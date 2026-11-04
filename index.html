@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>FLAPPY PIYUSH 🐑✝️</title>
+<style>
+  :root{--bg:#0a1a33;--ink:#fff;--accent:#ffd23f;--panel:#12294d}
+  html,body{margin:0;height:100%;background:var(--bg);overflow:hidden;touch-action:manipulation;
+    -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
+    font-family:"Trebuchet MS","Segoe UI",Verdana,sans-serif;color:var(--ink)}
+  body{display:flex;align-items:center;justify-content:center}
+  #wrap{position:relative;width:min(100vw,62.5vh);height:min(160vw,100vh);
+    width:min(100vw,62.5dvh);height:min(160vw,100dvh)}
+  canvas{width:100%;height:100%;display:block;border-radius:10px}
+  #gear{position:absolute;top:8px;right:8px;width:38px;height:38px;border-radius:50%;border:0;
+    background:rgba(0,0,0,.4);color:#fff;font-size:20px;cursor:pointer}
+  #panel{position:absolute;inset:0;background:rgba(10,26,51,.96);display:none;flex-direction:column;
+    gap:14px;padding:24px;box-sizing:border-box;justify-content:center;font-size:15px}
+  #panel.open{display:flex}
+  #panel h2{margin:0 0 4px;font-size:22px}
+  #panel label{display:flex;flex-direction:column;gap:6px}
+  #panel input{font-size:14px;color:#fff}
+  #panel button{padding:12px;border-radius:8px;border:0;font-weight:700;font-size:15px;cursor:pointer;
+    background:var(--accent);color:#1b1b1b}
+  #panel button.ghost{background:transparent;color:#fff;border:1px solid #5a7099}
+  #status{font-size:13px;opacity:.8;min-height:34px}
+  @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto}}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="c" width="800" height="1280"></canvas>
+  <button id="gear" aria-label="Settings">⚙</button>
+  <div id="panel">
+    <h2>Face &amp; music</h2>
+    <label>Friend’s face photo<input type="file" id="faceIn" accept="image/*"></label>
+    <label>Looping audio<input type="file" id="audIn" accept="audio/*"></label>
+    <div id="status"></div>
+    <button id="done">Done</button>
+    <button class="ghost" id="reset">Remove saved face &amp; audio</button>
+  </div>
+</div>
+
+<script>
+(() => {
+  const TITLE = "FLAPPY PIYUSH 🐑✝️";
+  const OUT_TEXT = "SHEEPMAN 🐑✝️ is OUT";
+  const FACE_FILES = ["face.jpg", "face.png", "face.jpeg"]; // put your friend's photo next to index.html
+  const AUDIO_FILE = "audio.mp3";                           // put the unique audio next to index.html
+
+  const W = 400, H = 640, GROUND = 80, R = 24, HIT = 18, GAP = 165, PW = 64, SPACING = 215;
+  const c = document.getElementById("c"), ctx = c.getContext("2d");
+  ctx.scale(2, 2);
+
+  /* ---------- storage (IndexedDB) for uploaded face / audio ---------- */
+  const db = new Promise(res => {
+    try {
+      const r = indexedDB.open("flappy-piyush", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("f");
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => res(null);
+    } catch (e) { res(null); }
+  });
+  const dbGet = k => db.then(d => !d ? null : new Promise(r => {
+    try { const q = d.transaction("f").objectStore("f").get(k); q.onsuccess = () => r(q.result || null); q.onerror = () => r(null); } catch (e) { r(null); }
+  }));
+  const dbSet = (k, v) => db.then(d => d && new Promise(r => {
+    try { const t = d.transaction("f", "readwrite"); t.objectStore("f").put(v, k); t.oncomplete = r; t.onerror = r; } catch (e) { r(); }
+  }));
+  const dbDel = k => db.then(d => d && new Promise(r => {
+    try { const t = d.transaction("f", "readwrite"); t.objectStore("f").delete(k); t.oncomplete = r; t.onerror = r; } catch (e) { r(); }
+  }));
+
+  /* ---------- face ---------- */
+  let face = null;
+  function setFaceFromSrc(src, cb) {
+    const img = new Image();
+    img.onload = () => {
+      const s = Math.min(img.width, img.height), t = document.createElement("canvas");
+      t.width = t.height = 256;
+      t.getContext("2d").drawImage(img, (img.width - s) / 2, (img.height - s) / 2, s, s, 0, 0, 256, 256);
+      face = t; cb && cb(true);
+    };
+    img.onerror = () => cb && cb(false);
+    img.src = src;
+  }
+  async function loadFace() {
+    const saved = await dbGet("face");
+    if (saved) { const u = URL.createObjectURL(saved); setFaceFromSrc(u); return; }
+    let i = 0;
+    const next = () => { if (i < FACE_FILES.length) setFaceFromSrc(FACE_FILES[i++], ok => { if (!ok) next(); }); };
+    next();
+  }
+
+  /* ---------- audio: looped, restarts from the beginning ---------- */
+  const audio = new Audio();
+  audio.loop = true; audio.preload = "auto";
+  let useSynth = false, wantMusic = false, actx = null, synthTimer = null, synthGain = null, step = 0, nextT = 0;
+
+  function ensureCtx() {
+    if (!actx) { try { actx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+    if (actx && actx.state === "suspended") actx.resume();
+  }
+  audio.addEventListener("error", () => { useSynth = true; if (wantMusic) startSynth(); });
+
+  async function loadAudio() {
+    const saved = await dbGet("audio");
+    useSynth = false;
+    audio.src = saved ? URL.createObjectURL(saved) : AUDIO_FILE;
+    audio.load();
+  }
+
+  const LEAD = [0,3,7,10,12,10,7,3, 5,8,12,15,17,15,12,8];
+  const BASS = [0,0,7,7, 5,5,3,3];
+  const hz = n => 220 * Math.pow(2, n / 12);
+  function tone(t, f, d, type, vol) {
+    const o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.value = f;
+    g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0001, t + d);
+    o.connect(g); g.connect(synthGain); o.start(t); o.stop(t + d + 0.02);
+  }
+  function startSynth() {
+    ensureCtx(); if (!actx) return;
+    stopSynth();
+    synthGain = actx.createGain(); synthGain.gain.value = 0.5; synthGain.connect(actx.destination);
+    step = 0; nextT = actx.currentTime + 0.05;
+    synthTimer = setInterval(() => {
+      while (nextT < actx.currentTime + 0.3) {
+        tone(nextT, hz(LEAD[step % 16]), 0.16, "square", 0.08);
+        if (step % 2 === 0) tone(nextT, hz(BASS[(step / 2) % 8] - 24), 0.3, "triangle", 0.2);
+        step++; nextT += 0.17;
+      }
+    }, 80);
+  }
+  function stopSynth() {
+    if (synthTimer) clearInterval(synthTimer); synthTimer = null;
+    if (synthGain) { try { synthGain.disconnect(); } catch (e) {} synthGain = null; }
+  }
+  function restartMusic() {          // always from the very first second
+    wantMusic = true; ensureCtx();
+    if (useSynth) { startSynth(); return; }
+    try { audio.currentTime = 0; } catch (e) {}
+    const p = audio.play(); if (p && p.catch) p.catch(() => {});
+  }
+  function blip(f) {
+    ensureCtx(); if (!actx) return;
+    const t = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+    o.type = "square"; o.frequency.setValueAtTime(f, t); o.frequency.exponentialRampToValueAtTime(f * 1.6, t + 0.08);
+    g.gain.setValueAtTime(0.06, t); g.gain.exponentialRampToValueAtTime(0.0001, t + 0.1);
+    o.connect(g); g.connect(actx.destination); o.start(t); o.stop(t + 0.12);
+  }
+
+  /* ---------- game state ---------- */
+  let state = "ready", bird, pipes, score, best = 0, scroll = 0, tick = 0, overAt = 0, acc = 0, last = 0;
+  try { best = +localStorage.getItem("fp-best") || 0; } catch (e) {}
+
+  function reset() {
+    bird = { y: H / 2 - 40, v: 0, rot: 0 };
+    pipes = []; score = 0; tick = 0;
+  }
+  reset();
+
+  function flap() {
+    if (state === "ready") { state = "play"; restartMusic(); }
+    else if (state === "over") {
+      if (performance.now() - overAt < 600) return;
+      reset(); state = "play"; restartMusic();
+    }
+    if (state === "play") { bird.v = -7.4; blip(520); }
+  }
+
+  function die() {
+    state = "over"; overAt = performance.now();
+    if (score > best) { best = score; try { localStorage.setItem("fp-best", best); } catch (e) {} }
+    restartMusic();                  // audio starts again from the beginning every time he's out
+  }
+
+  function update() {
+    scroll = (scroll + 2.6) % 40;
+    if (state === "ready") { bird.y = H / 2 - 40 + Math.sin(performance.now() / 220) * 8; return; }
+    if (state !== "play") return;
+    bird.v += 0.45; bird.y += bird.v;
+    bird.rot = Math.max(-0.4, Math.min(1.2, bird.v / 10));
+    if (bird.y < R) { bird.y = R; bird.v = 0; }
+    if (tick++ % Math.round(SPACING / 2.6) === 0) {
+      pipes.push({ x: W + 10, top: 70 + Math.random() * (H - GROUND - GAP - 140), scored: false });
+    }
+    const bx = 110;
+    for (const p of pipes) {
+      p.x -= 2.6;
+      if (bx + HIT > p.x && bx - HIT < p.x + PW && (bird.y - HIT < p.top || bird.y + HIT > p.top + GAP)) return die();
+      if (!p.scored && p.x + PW < bx) { p.scored = true; score++; }
+    }
+    pipes = pipes.filter(p => p.x > -PW - 10);
+    if (bird.y + HIT >= H - GROUND) { bird.y = H - GROUND - HIT; die(); }
+  }
+
+  /* ---------- drawing ---------- */
+  function drawFace(x, y, r, rot, ring) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+    ctx.beginPath(); ctx.arc(0, 0, r + 3, 0, 7); ctx.fillStyle = ring || "#fff"; ctx.fill();
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.save(); ctx.clip();
+    if (face) ctx.drawImage(face, -r, -r, r * 2, r * 2);
+    else { ctx.fillStyle = "#f4f0e6"; ctx.fillRect(-r, -r, r * 2, r * 2);
+      ctx.font = r * 1.5 + "px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText("🐑", 0, 2); }
+    ctx.restore(); ctx.restore();
+  }
+  function text(s, x, y, size, color, align) {
+    ctx.font = "800 " + size + "px 'Trebuchet MS','Segoe UI',sans-serif";
+    ctx.textAlign = align || "center"; ctx.textBaseline = "middle";
+    ctx.lineWidth = size / 5; ctx.strokeStyle = "rgba(10,20,40,.85)"; ctx.lineJoin = "round";
+    ctx.strokeText(s, x, y); ctx.fillStyle = color || "#fff"; ctx.fillText(s, x, y);
+  }
+
+  function draw() {
+    const g = ctx.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0, "#1c3f8f"); g.addColorStop(.6, "#4f8fd6"); g.addColorStop(1, "#bfe3f5");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "rgba(255,255,255,.5)";
+    for (const [cx, cy] of [[70, 140], [300, 210], [180, 330]]) {
+      const x = ((cx - scroll * 0.4 + 520) % 520) - 60;
+      ctx.beginPath(); ctx.arc(x, cy, 22, 0, 7); ctx.arc(x + 24, cy + 4, 18, 0, 7); ctx.arc(x - 22, cy + 6, 16, 0, 7); ctx.fill();
+    }
+    for (const p of pipes) {
+      const bottom = p.top + GAP;
+      ctx.fillStyle = "#3aa04a"; ctx.strokeStyle = "#1d5e2a"; ctx.lineWidth = 3;
+      ctx.fillRect(p.x, 0, PW, p.top); ctx.strokeRect(p.x, -3, PW, p.top + 3);
+      ctx.fillRect(p.x - 5, p.top - 24, PW + 10, 24); ctx.strokeRect(p.x - 5, p.top - 24, PW + 10, 24);
+      ctx.fillRect(p.x, bottom, PW, H - bottom - GROUND); ctx.strokeRect(p.x, bottom, PW, H - bottom - GROUND);
+      ctx.fillRect(p.x - 5, bottom, PW + 10, 24); ctx.strokeRect(p.x - 5, bottom, PW + 10, 24);
+    }
+    ctx.fillStyle = "#d8c27a"; ctx.fillRect(0, H - GROUND, W, GROUND);
+    ctx.fillStyle = "#5fbf4a"; ctx.fillRect(0, H - GROUND, W, 14);
+    ctx.fillStyle = "#4aa03a";
+    for (let x = -40; x < W + 40; x += 40) { ctx.beginPath(); ctx.moveTo(x - scroll, H - GROUND); ctx.lineTo(x + 20 - scroll, H - GROUND); ctx.lineTo(x - scroll, H - GROUND + 14); ctx.fill(); }
+
+    drawFace(110, bird.y, R, bird.rot);
+
+    if (state === "play") text(String(score), W / 2, 70, 56);
+    if (state === "ready") {
+      text("FLAPPY PIYUSH", W / 2, 150, 38, "#ffd23f");
+      text("🐑✝️", W / 2, 205, 40);
+      text("Tap / Space to flap", W / 2, 400, 24);
+      text("Best: " + best, W / 2, 440, 20);
+    }
+    if (state === "over") {
+      ctx.fillStyle = "rgba(8,14,30,.72)"; ctx.fillRect(0, 0, W, H);
+      drawFace(W / 2, 200, 78, 0, "#ff3b3b");
+      text("SHEEPMAN 🐑✝️", W / 2, 345, 36, "#ff5a5a");
+      text("is OUT", W / 2, 392, 36, "#ff5a5a");
+      text("Score " + score + "   ·   Best " + best, W / 2, 450, 24);
+      text(performance.now() - overAt < 600 ? " " : "Tap to retry", W / 2, 510, 26, "#ffd23f");
+    }
+  }
+
+  function loop(t) {
+    acc += Math.min(t - last, 100); last = t;
+    while (acc >= 1000 / 60) { update(); acc -= 1000 / 60; }
+    draw(); requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(t => { last = t; loop(t); });
+
+  /* ---------- input ---------- */
+  const wrap = document.getElementById("wrap"), panel = document.getElementById("panel"), gear = document.getElementById("gear");
+  wrap.addEventListener("pointerdown", e => {
+    if (e.target === gear || panel.contains(e.target)) return;
+    e.preventDefault(); flap();
+  });
+  addEventListener("keydown", e => {
+    if (["Space", "ArrowUp", "KeyW"].includes(e.code)) { e.preventDefault(); if (!e.repeat) flap(); }
+  });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) audio.pause(); else if (wantMusic && !useSynth) audio.play().catch(() => {}); });
+
+  /* ---------- settings ---------- */
+  const status = document.getElementById("status");
+  gear.onclick = () => { panel.classList.add("open"); };
+  document.getElementById("done").onclick = () => panel.classList.remove("open");
+  document.getElementById("faceIn").onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    await dbSet("face", f); setFaceFromSrc(URL.createObjectURL(f), ok => status.textContent = ok ? "Face saved on this device ✔" : "Couldn’t read that image.");
+  };
+  document.getElementById("audIn").onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    await dbSet("audio", f); await loadAudio(); status.textContent = "Audio saved on this device ✔";
+    if (wantMusic) restartMusic();
+  };
+  document.getElementById("reset").onclick = async () => {
+    await dbDel("face"); await dbDel("audio"); face = null; await loadFace(); await loadAudio();
+    status.textContent = "Back to face.jpg / audio.mp3 (or the built-in tune).";
+  };
+
+  document.title = TITLE;
+  loadFace(); loadAudio();
+})();
+</script>
+</body>
+</html>
