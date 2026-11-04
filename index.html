@@ -143,6 +143,23 @@
     try { audio.currentTime = 0; } catch (e) {}
     const p = audio.play(); if (p && p.catch) p.catch(() => {});
   }
+  function stopMusic() {             // silence when he's out
+    wantMusic = false;
+    stopSynth();
+    try { audio.pause(); audio.currentTime = 0; } catch (e) {}
+  }
+  function say(word) {               // text-to-speech
+    try {
+      const s = window.speechSynthesis; if (!s) return;
+      s.cancel();
+      const u = new SpeechSynthesisUtterance(word);
+      u.rate = 0.85; u.pitch = 1; u.volume = 1; u.lang = "en-US";
+      s.speak(u);
+    } catch (e) {}
+  }
+  function primeSpeech() {           // unlocks speech on mobile during the first tap
+    try { const u = new SpeechSynthesisUtterance(" "); u.volume = 0; window.speechSynthesis.speak(u); } catch (e) {}
+  }
   function blip(f) {
     ensureCtx(); if (!actx) return;
     const t = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
@@ -162,9 +179,10 @@
   reset();
 
   function flap() {
-    if (state === "ready") { state = "play"; restartMusic(); }
+    if (state === "ready") { state = "play"; primeSpeech(); restartMusic(); }
     else if (state === "over") {
       if (performance.now() - overAt < 600) return;
+      try { window.speechSynthesis.cancel(); } catch (e) {}
       reset(); state = "play"; restartMusic();
     }
     if (state === "play") { bird.v = -7.4; blip(520); }
@@ -173,7 +191,8 @@
   function die() {
     state = "over"; overAt = performance.now();
     if (score > best) { best = score; try { localStorage.setItem("fp-best", best); } catch (e) {} }
-    restartMusic();                  // audio starts again from the beginning every time he's out
+    stopMusic();                     // audio ends when he's out; a new round restarts it from 0:00
+    say("Hallelujah");
   }
 
   function update() {
@@ -270,7 +289,7 @@
   addEventListener("keydown", e => {
     if (["Space", "ArrowUp", "KeyW"].includes(e.code)) { e.preventDefault(); if (!e.repeat) flap(); }
   });
-  document.addEventListener("visibilitychange", () => { if (document.hidden) audio.pause(); else if (wantMusic && !useSynth) audio.play().catch(() => {}); });
+  document.addEventListener("visibilitychange", () => { if (document.hidden) audio.pause(); else if (state === "play" && wantMusic && !useSynth) audio.play().catch(() => {}); });
 
   /* ---------- settings ---------- */
   const status = document.getElementById("status");
